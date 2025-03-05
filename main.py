@@ -16,7 +16,7 @@ import argparse
 # autoregressive sampling
 from sampling.autoregressive_sampling import autoregressive_sampling
 # speculative sampling
-#from sampling.speculative_sampling import speculative_sampling
+from sampling.speculative_sampling import speculative_sampling
 
 MODELZOO = {
     'Janus-Pro-1B': 'models/Janus-Pro-1B',
@@ -106,7 +106,7 @@ def prompt_to_tokens(chat_processor: VLChatProcessor, prompt: str):
         tokens[i, :] = input_ids
         if i % 2 != 0:
             tokens[i, 1:-1] = chat_processor.pad_id
-    print(tokens)
+    #print(tokens)
     return tokens
 
 @torch.inference_mode()
@@ -114,6 +114,8 @@ def main(args):
     # load tokenizer
     # NOTE() approx_model_name and target_model_name should use the same tokenizer!
     # text tokenizer of Janus-1B and Janus-7B is slightly different, but their image token codebooks might be the same
+    torch.manual_seed(args.seed)
+
     approx_chat_processor: VLChatProcessor = VLChatProcessor.from_pretrained(args.approx_model_name)
     target_chat_processor: VLChatProcessor = VLChatProcessor.from_pretrained(args.target_model_name)
 
@@ -124,14 +126,14 @@ def main(args):
     print(f"begin loading models: \n {args.approx_model_name} \n {args.target_model_name}")
     precision = {'none': torch.float32, 'bf16': torch.bfloat16, 'fp16': torch.float16}[args.precision]
     approx_model: MultiModalityCausalLM = AutoModelForCausalLM.from_pretrained(
-        args.approx_model_name, device_map = 'cuda', torch_dtype = precision, trust_remote_code=True
+        args.approx_model_name, trust_remote_code=True
     )
-    approx_model = approx_model.eval()
+    approx_model = approx_model.to(precision).cuda().eval()
 
     target_model: MultiModalityCausalLM = AutoModelForCausalLM.from_pretrained(
-        args.target_model_name, device_map = 'cuda', torch_dtype = precision, trust_remote_code=True
+        args.target_model_name, trust_remote_code=True
     )
-    target_model = target_model.eval()
+    target_model = target_model.to(precision).cuda().eval()
 
     # autoregressive sampling
     torch.cuda.synchronize()
@@ -212,7 +214,49 @@ def main(args):
         cfg_weight=args.cfg_weight)
 
     # speculative sampling
-    # TODO
+    torch.cuda.synchronize()
+    t1 = time.time()
+    index_sample = speculative_sampling(
+        prefix=approx_input_ids,
+        prefix_2=target_input_ids,
+        approx_model=approx_model, 
+        target_model=target_model, 
+        max_len=args.max_new_tokens, 
+        gamma=args.gamma,
+        approx_tmp=args.approx_tmp,
+        target_tmp=args.target_tmp, 
+        top_k=args.top_k,
+        top_p=args.top_p,
+        random_seed=args.seed,
+        cfg_weight=args.cfg_weight
+        )
+    torch.cuda.synchronize()
+    sampling_time = time.time() - t1
+    print(f"{args.target_model_name} sampling takes about {sampling_time:.2f} seconds.")
+    
+    # decode
+    dec = target_model.gen_vision_model.decode_code(index_sample.to(dtype=torch.int), shape=[1, 8, args.img_size//args.patch_size, args.img_size//args.patch_size])
+    dec = dec.to(torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
+    dec = np.clip((dec + 1) / 2 * 255, 0, 255)
+
+    t2 = time.time()
+    decoder_time = time.time() - t2
+    print(f"decoder takes about {decoder_time:.2f} seconds.")
+
+    # Save and display images:
+    visual_img = np.zeros((1, args.img_size, args.img_size, 3), dtype=np.uint8)
+    visual_img[:, :, :] = dec
+
+    os.makedirs('generated_samples', exist_ok=True)
+    save_path = os.path.join('generated_samples', "speculative_sampling_img.jpg")
+    PIL.Image.fromarray(visual_img[0]).save(save_path)
+    print(f'image is saved to {save_path}')
+
+    if args.benchmark:
+        benchmark(speculative_sampling, 'speculative sampling', test_time=args.test_time, use_profiler=False, prefix=approx_input_ids, prefix_2=target_input_ids,
+        approx_model=approx_model, target_model=target_model, max_len=args.max_new_tokens, gamma=args.gamma,
+        approx_tmp=args.approx_tmp, target_tmp=args.target_tmp, top_k=args.top_k, top_p=args.top_p,
+        random_seed=args.seed, cfg_weight=args.cfg_weight, benchmark = True)
 
 if __name__ == "__main__":
     args = parse_arguments()
