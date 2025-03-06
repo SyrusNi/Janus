@@ -188,7 +188,7 @@ def main(args):
         )
     torch.cuda.synchronize()
     sampling_time = time.time() - t1
-    print(f"{args.target_model_name} sampling takes about {sampling_time:.2f} seconds.")
+    print(f"speculative sampling takes about {sampling_time:.2f} seconds.")
     
     # decode
     dec = target_model.gen_vision_model.decode_code(index_sample.to(dtype=torch.int), shape=[1, 8, args.img_size//args.patch_size, args.img_size//args.patch_size])
